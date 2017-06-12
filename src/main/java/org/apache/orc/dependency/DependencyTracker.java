@@ -24,13 +24,17 @@ import java.util.BitSet;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.DefaultParser;
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Option;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.ParseException;
 import org.objectweb.asm.ClassReader;
 
 /**
@@ -38,13 +42,27 @@ import org.objectweb.asm.ClassReader;
  */
 public class DependencyTracker {
 
+  private static String rootPackage;
+  private static List<String> excludedPackages;
+  private static List<String> includedPackages;
+
   static boolean isRoot(String name) {
-    return name.startsWith("org.apache.hadoop.hive.metastore.");
+    return name.startsWith(rootPackage);
   }
 
-  static boolean isSystem(String name) {
-    return !(name.startsWith("org.apache.hadoop.hive") ||
-        name.startsWith("org.apache.hive"));
+  static boolean isIncluded(String name) {
+    if (includedPackages == null) return !isExcluded(name);
+    for (String included : includedPackages) {
+      if (name.startsWith(included)) return !isExcluded(name);
+    }
+    return false;
+  }
+
+  static boolean isExcluded(String name) {
+    for (String excluded : excludedPackages) {
+      if (name.startsWith(excluded)) return true;
+    }
+    return false;
   }
 
   static class ClassInfo {
@@ -111,7 +129,7 @@ public class DependencyTracker {
                                 ClassInfo parent,
                                 String name) {
     for(String dep: v.getDependencies(name)) {
-      if (!isSystem(dep)) {
+      if (isIncluded(dep)) {
         boolean visited = info.containsKey(dep);
         ClassInfo child = getClassInfo(dep);
         child.prev.add(parent);
@@ -126,7 +144,75 @@ public class DependencyTracker {
   public static void main(final String[] args) throws IOException {
     DependencyVisitor v = new DependencyVisitor();
 
-    ZipFile f = new ZipFile(args[0]);
+    Options options = new Options();
+
+    Option option = Option.builder("h")
+        .longOpt("help")
+        .build();
+    options.addOption(option);
+
+    option = Option.builder("i")
+        .longOpt("include")
+        .desc("Packages to include, anything in or under these packages will be included.  If " +
+            "this is null then everything will be included.")
+        .hasArg()
+        .build();
+    options.addOption(option);
+
+    option = Option.builder("r")
+        .longOpt("root")
+        .hasArg()
+        .desc("Root to start dependency checking from")
+        .build();
+    options.addOption(option);
+
+    option = Option.builder("x")
+        .longOpt("exclude")
+        .desc("Packages to exclude, anything in or under these packages will be ignored.  This is" +
+            " applied after the include option.  If this is null just systems packages will be " +
+            "ignored.")
+        .hasArg()
+        .build();
+    options.addOption(option);
+
+    CommandLine cli = null;
+    try {
+      cli = new DefaultParser().parse(options, args, false);
+    } catch (ParseException e) {
+      System.err.println("Parse Exception: " + e.getMessage());
+      usage(options);
+      return;
+    }
+
+    if (cli.hasOption('h')) {
+      usage(options);
+      return;
+    }
+
+    if (!cli.hasOption('r')) {
+      usage(options);
+      return;
+    }
+    rootPackage = cli.getOptionValue('r');
+
+    excludedPackages = new ArrayList<>();
+    excludedPackages.add("java.");
+    excludedPackages.add("javax.");
+    if (cli.hasOption('x')) {
+      excludedPackages.addAll(Arrays.asList(cli.getOptionValues('x')));
+    }
+
+    if (cli.hasOption('i')) {
+      includedPackages = Arrays.asList(cli.getOptionValues('i'));
+    }
+
+    List<String> leftOver = cli.getArgList();
+    if (leftOver.size() != 1) {
+      usage(options);
+      return;
+    }
+
+    ZipFile f = new ZipFile(leftOver.get(0));
     Enumeration<? extends ZipEntry> en = f.entries();
     while (en.hasMoreElements()) {
       ZipEntry e = en.nextElement();
@@ -216,5 +302,12 @@ public class DependencyTracker {
       }
     }
   }
+
+  private static void usage(Options options) {
+    HelpFormatter formatter = new HelpFormatter();
+    String header = "This tool maps the dependencies of all classes in a given package.";
+    formatter.printHelp("deptracker [options] jar", header, options, null);
+  }
+
 
 }
